@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Uplink OS — WebAssembly Edition</title>
+  <style>
+    :root { --bg-dark: #0b0b0b; --bg-bottom: #112b3c; --cyan: #2baaff; --text: #e2f1ff; --muted: #7aa3c4; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      background: linear-gradient(180deg, var(--bg-dark) 0%, var(--bg-dark) 45%, var(--bg-bottom) 100%);
+      color: var(--text); font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      overflow: hidden; display: flex; flex-direction: column;
+    }
+    header {
+      height: 40px; padding: 0 16px; display: flex; align-items: center; justify-content: space-between;
+      background: rgba(11, 16, 22, 0.92); border-bottom: 1px solid rgba(43, 170, 255, 0.35);
+      user-select: none; flex-shrink: 0;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--cyan); font-weight: 600; }
+    .badge { font-size: 10px; padding: 2px 7px; border: 1px solid rgba(43, 170, 255, 0.5); background: rgba(43, 170, 255, 0.12); color: #bfe6ff; letter-spacing: 0.08em; }
+    .controls { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+    button.btn { background: rgba(17, 43, 60, 0.75); border: 1px solid rgba(43, 170, 255, 0.55); color: var(--cyan); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; padding: 4px 10px; cursor: pointer; }
+    button.btn:hover { background: var(--cyan); color: #0b0b0b; }
+    main { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; padding: 8px; overflow: hidden; }
+    #canvas { display: block; width: 1024px; height: 768px; max-width: 100%; max-height: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #0b0b0b; border: 1px solid rgba(43, 170, 255, 0.45); box-shadow: 0 0 36px rgba(43, 170, 255, 0.15); outline: none; }
+    #loading-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: rgba(11, 11, 11, 0.94); z-index: 10; transition: opacity 0.35s ease; }
+    #loading-overlay.hidden { opacity: 0; pointer-events: none; }
+    .loading-title { font-size: 22px; letter-spacing: 0.25em; color: var(--cyan); font-weight: 300; }
+    .progress-bar { width: 320px; height: 4px; background: rgba(43, 170, 255, 0.18); overflow: hidden; }
+    .progress-fill { height: 100%; width: 0%; background: var(--cyan); transition: width 0.2s ease; }
+    #status-text { font-size: 12px; color: var(--muted); letter-spacing: 0.06em; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand"><span>UPLINK OS</span><span class="badge">v1.04 GOLD • WASM</span></div>
+    <div class="controls">
+      <span id="save-status">IDBFS Ready</span>
+      <button class="btn" id="btn-sync">Sync Saves</button>
+      <button class="btn" id="btn-fullscreen">Fullscreen</button>
+    </div>
+  </header>
+  <main>
+    <div id="loading-overlay">
+      <div class="loading-title">UPLINK OS // INITIALIZING</div>
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      <div id="status-text">Downloading WebAssembly engine and Uplink OS assets...</div>
+    </div>
+    <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+  </main>
+  <script>
+    const canvas = document.getElementById('canvas');
+    const overlay = document.getElementById('loading-overlay');
+    const statusText = document.getElementById('status-text');
+    const progressFill = document.getElementById('progress-fill');
+    const saveStatus = document.getElementById('save-status');
+
+    function syncSaves(populate, cb) {
+      if (!window.Module || !Module.FS) { if (cb) cb(); return; }
+      try {
+        Module.FS.syncfs(populate, function(err) {
+          saveStatus.textContent = err ? 'Save sync warning' : (populate ? 'Saves Loaded' : 'Saves Synced');
+          if (cb) cb();
+        });
+      } catch (e) { if (cb) cb(); }
+    }
+
+    document.getElementById('btn-sync').addEventListener('click', () => syncSaves(false));
+    document.getElementById('btn-fullscreen').addEventListener('click', () => {
+      if (!document.fullscreenElement) canvas.requestFullscreen && canvas.requestFullscreen();
+      else document.exitFullscreen && document.exitFullscreen();
+    });
+
+    function unlockAudioAndFocus() {
+      canvas.focus();
+      try {
+        if (window.SDL2 && window.SDL2.audioContext && window.SDL2.audioContext.state === 'suspended') {
+          window.SDL2.audioContext.resume();
+        }
+      } catch (_) {}
+    }
+    canvas.addEventListener('mousedown', unlockAudioAndFocus);
+    window.addEventListener('keydown', unlockAudioAndFocus, { once: true });
+    window.addEventListener('beforeunload', () => syncSaves(false));
+
+    var Module = {
+      canvas: canvas,
+      preRun: [
+        function() {
+          const mkdirp = (dir) => {
+            const parts = dir.split('/').filter(Boolean);
+            let cur = '';
+            for (const part of parts) { cur += '/' + part; try { Module.FS.mkdir(cur); } catch (_) {} }
+          };
+          mkdirp('/home/web_user/.uplink');
+          try {
+            const idbfs = Module.IDBFS || (Module.FS && Module.FS.filesystems && Module.FS.filesystems.IDBFS);
+            if (!idbfs) throw new Error('IDBFS not exported');
+            Module.FS.mount(idbfs, {}, '/home/web_user/.uplink');
+            Module.addRunDependency('idbfs-load');
+            Module.FS.syncfs(true, function(err) {
+              saveStatus.textContent = err ? 'IDBFS warning' : 'IDBFS Synced';
+              Module.removeRunDependency('idbfs-load');
+            });
+          } catch (e) {
+            saveStatus.textContent = 'Memory Saves';
+          }
+        }
+      ],
+      onRuntimeInitialized: function() {
+        setTimeout(() => { overlay.classList.add('hidden'); canvas.focus(); }, 250);
+        setInterval(() => syncSaves(false), 15000);
+      },
+      setStatus: function(text) {
+        if (!text) return;
+        statusText.textContent = text;
+        const m = text.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+        if (m) progressFill.style.width = Math.min(100, Math.round((parseFloat(m[2]) / parseFloat(m[4])) * 100)) + '%';
+        else if (text === 'Running...') progressFill.style.width = '100%';
+      },
+      print: function(text) { console.log('[UplinkOS]', text); },
+      printErr: function(text) { console.warn('[UplinkOS]', text); }
+    };
+  </script>
+  <script async src="uplink.js"></script>
+</body>
+</html>
